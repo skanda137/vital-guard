@@ -1,0 +1,48 @@
+VitalGuard technical-effect summary
+======================================
+
+MODE: mixed — real data from ./measured (motion gating and SOS latency are simulation-based)
+
+
+[BP Systolic]  n=72
+  Mean error (bias) : +2.63 mmHg   (ISO 81060-2 limit |mean| <= 5)
+  SD of error       : 17.99 mmHg      (ISO 81060-2 limit SD <= 8)
+  95% limits of agr.: -32.6 to +37.9 mmHg
+  Pearson r         : 0.361
+  ISO 81060-2 (basic) : CHECK
+  -> 01_bp_systolic_accuracy.png
+
+[BP Diastolic]  n=72
+  Mean error (bias) : +2.24 mmHg   (ISO 81060-2 limit |mean| <= 5)
+  SD of error       : 10.21 mmHg      (ISO 81060-2 limit SD <= 8)
+  95% limits of agr.: -17.8 to +22.3 mmHg
+  Pearson r         : 0.383
+  ISO 81060-2 (basic) : CHECK
+  -> 01_bp_diastolic_accuracy.png
+
+[PPG MOTION GATING — core inventive step]
+  Envelope roughness without gating : 0.230
+  Envelope roughness with gating    : 0.108  (lower = cleaner)
+  SBP/DBP (ungated)                 : 146 / 70 mmHg
+  SBP/DBP (PPG-gated)               : 126 / 86 mmHg
+  MAP (gated)                       : 90 mmHg
+  -> 02_ppg_motion_gating_core_inventive_step.png
+  NOTE: report the gated SBP/DBP against a reference cuff to show
+        the accuracy recovered by gating during motion.
+
+[SpO₂]  Skipped — column 'ref_spo2' is all NaN (not in dataset)
+
+[Heart rate]  n=72
+  RMSE=11.14 bpm  MAE=6.98 bpm  Pearson r=0.437
+  -> 03_heart_rate_accuracy.png
+
+[SOS LATENCY]  n=54
+  median=3.60s  mean=3.72s  p95=5.29s
+  -> 04_sos_latency.png
+
+[RISK MODEL]  n=74
+  AUC=0.713  acc=0.757
+  precision=0.500
+  recall(sens)=0.333
+  F1=0.400
+  -> 05_risk_model_performance.png
