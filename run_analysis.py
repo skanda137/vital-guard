@@ -124,16 +124,17 @@ def main():
         print(f"  [warn] {name} not found, using synthetic fallback")
         return gen()
 
-    bp_validation(load("bp_validation.csv",         lambda: None), args.out, synthetic, log)
+    from vitalguard_analysis import synth_bp, synth_risk
+    bp_validation(load("bp_validation.csv", synth_bp),   args.out, synthetic, log)
     motion_gating(load("motion_gating_waveform.csv", synth_gating), args.out, True,      log)
     spo2_hr_patched(load("spo2_hr.csv",             lambda: pd.DataFrame()), args.out, synthetic, log)
     sos_latency(  load("sos_latency.csv",            synth_sos),    args.out, True,      log)
-    risk_model(   load("risk_model_predictions.csv", lambda: None), args.out, synthetic, log)
+    risk_model(   load("risk_model_predictions.csv", synth_risk),  args.out, synthetic, log)
 
     summary = "\n\n".join(log)
     with open(os.path.join(args.out, "summary.txt"), "w", encoding="utf-8") as f:
         f.write(summary + "\n")
-    print(summary)
+    print(summary.encode("ascii", errors="replace").decode("ascii"))
 
 
 if __name__ == "__main__":

@@ -2,16 +2,20 @@ import os
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, filtfilt, find_peaks
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.linear_model import Ridge
+from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 # ── Config ─────────────────────────────────────────────────────────────
-DATA_DIR = r"Data File\0_subject"
-XLSX     = r"Data File\PPG-BP dataset.xlsx"
-OUT_DIR  = "measured"
-FS       = 1000  # Hz
+DATA_DIR     = r"Data File\0_subject"
+XLSX         = r"Data File\PPG-BP dataset.xlsx"
+OUT_DIR      = "measured"
+FS           = 1000  # Hz
+feature_cols = [
+    "hr_est", "mean_amp", "std_amp", "mean_width",
+    "auc_ppg", "sig_range", "kurtosis", "skewness",
+    "max_slope", "min_slope", "rr_mean"
+]
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -19,14 +23,14 @@ os.makedirs(OUT_DIR, exist_ok=True)
 meta = pd.read_excel(XLSX, header=1)
 meta.columns = meta.columns.str.strip()
 meta = meta.rename(columns={
-    "subject_ID":                    "subject_id",
-    "Systolic Blood Pressure(mmHg)": "sbp",
-    "Diastolic Blood Pressure(mmHg)":"dbp",
-    "Heart Rate(b/m)":               "hr_ref",
-    "Age(year)":                     "age",
-    "Sex(M/F)":                      "sex",
-    "BMI(kg/m^2)":                   "bmi",
-    "Hypertension":                  "hypertension",
+    "subject_ID":                     "subject_id",
+    "Systolic Blood Pressure(mmHg)":  "sbp",
+    "Diastolic Blood Pressure(mmHg)": "dbp",
+    "Heart Rate(b/m)":                "hr_ref",
+    "Age(year)":                      "age",
+    "Sex(M/F)":                       "sex",
+    "BMI(kg/m^2)":                    "bmi",
+    "Hypertension":                   "hypertension",
 })
 meta = meta.dropna(subset=["subject_id", "sbp", "dbp"])
 meta["subject_id"] = meta["subject_id"].astype(int)
@@ -51,21 +55,48 @@ def extract_features(sig, fs=FS):
     mean_amp   = np.mean(amplitudes)
     std_amp    = np.std(amplitudes)
 
-    sdnn  = np.std(rr) * 1000
-    rmssd = np.sqrt(np.mean(np.diff(rr) ** 2)) * 1000 if len(rr) > 1 else np.nan
-    skewness = float(pd.Series(filtered).skew())
+    # Pulse width at half amplitude (arterial stiffness proxy)
+    half_amp = mean_amp / 2
+    widths = []
+    for pk in peaks:
+        left_seg  = filtered[:pk][::-1]
+        right_seg = filtered[pk:]
+        l_idx = np.searchsorted(left_seg < half_amp, True)
+        r_idx = np.searchsorted(right_seg < half_amp, True)
+        widths.append(l_idx + r_idx)
+    mean_width = np.mean(widths) / fs * 1000  # ms
+
+    # Area under curve (cardiac output proxy)
+    auc_ppg = np.trapezoid(np.abs(filtered)) / len(filtered)
+
+    # Signal range and shape
+    sig_range = filtered.max() - filtered.min()
+    kurtosis  = float(pd.Series(filtered).kurtosis())
+    skewness  = float(pd.Series(filtered).skew())
+
+    # Derivative features (augmentation index proxy)
+    d1        = np.diff(filtered)
+    max_slope = float(np.max(d1))
+    min_slope = float(np.min(d1))
+
+    # RR mean in ms
+    rr_mean = float(np.mean(rr) * 1000)
 
     return {
-        "hr_est":   hr_est,
-        "mean_amp": mean_amp,
-        "std_amp":  std_amp,
-        "sdnn":     sdnn,
-        "rmssd":    rmssd,
-        "skewness": skewness,
-        "n_peaks":  len(peaks),
+        "hr_est":     hr_est,
+        "mean_amp":   mean_amp,
+        "std_amp":    std_amp,
+        "mean_width": mean_width,
+        "auc_ppg":    auc_ppg,
+        "sig_range":  sig_range,
+        "kurtosis":   kurtosis,
+        "skewness":   skewness,
+        "max_slope":  max_slope,
+        "min_slope":  min_slope,
+        "rr_mean":    rr_mean,
     }
 
-# ── Load all PPG segments and extract features ─────────────────────────
+# ── Load all PPG segments ───────────────────────────────────────────────
 records = []
 
 for fname in os.listdir(DATA_DIR):
@@ -106,23 +137,16 @@ for fname in os.listdir(DATA_DIR):
     feats["hr_ref"]     = float(row["hr_ref"].values[0])
     records.append(feats)
 
-# ── Clean: drop NaN features BEFORE extracting any arrays ─────────────
-feature_cols = ["hr_est", "mean_amp", "std_amp", "sdnn", "rmssd", "skewness"]
-
+# ── Clean ───────────────────────────────────────────────────────────────
 df = pd.DataFrame(records)
 df = df.dropna(subset=feature_cols).reset_index(drop=True)
 
 print(f"Segments after cleaning: {len(df)}")
 print(f"Unique subjects: {df['subject_id'].nunique()}")
-print(f"SBP range: {df['sbp'].min():.0f} – {df['sbp'].max():.0f} mmHg")
+print(f"SBP range: {df['sbp'].min():.0f} - {df['sbp'].max():.0f} mmHg")
 
-# ── NOW extract arrays (after dropna, so sizes are consistent) ─────────
-X     = df[feature_cols].values
-y_sys = df["sbp"].values
-y_dia = df["dbp"].values
-
-# ── Per-subject train/test split (no data leakage) ────────────────────
-subjects = df["subject_id"].unique()
+# ── Per-subject train/test split ────────────────────────────────────────
+subjects   = df["subject_id"].unique()
 np.random.seed(42)
 np.random.shuffle(subjects)
 split      = int(len(subjects) * 0.8)
@@ -133,38 +157,70 @@ test_mask  = ~train_mask
 
 print(f"Train segments: {train_mask.sum()}  |  Test segments: {test_mask.sum()}")
 
-# ── bp_validation.csv ──────────────────────────────────────────────────
-scaler = StandardScaler()
+X     = df[feature_cols].values
+y_sys = df["sbp"].values
+y_dia = df["dbp"].values
+
+scaler  = StandardScaler()
 X_train = scaler.fit_transform(X[train_mask])
 X_test  = scaler.transform(X[test_mask])
 
-reg_sys = Ridge(alpha=1.0).fit(X_train, y_sys[train_mask])
-reg_dia = Ridge(alpha=1.0).fit(X_train, y_dia[train_mask])
+# ── Option 2: GradientBoosting instead of Ridge ────────────────────────
+reg_sys = GradientBoostingRegressor(
+    n_estimators=300, max_depth=4, learning_rate=0.05, random_state=42
+).fit(X_train, y_sys[train_mask])
+
+reg_dia = GradientBoostingRegressor(
+    n_estimators=300, max_depth=4, learning_rate=0.05, random_state=42
+).fit(X_train, y_dia[train_mask])
 
 dev_sys = reg_sys.predict(X_test)
 dev_dia = reg_dia.predict(X_test)
 
-bp_val = pd.DataFrame({
+# ── Option 3: Average across segments per subject ──────────────────────
+bp_raw = pd.DataFrame({
     "subject_id": df["subject_id"].values[test_mask],
     "ref_sys":    y_sys[test_mask],
     "ref_dia":    y_dia[test_mask],
     "dev_sys":    dev_sys,
     "dev_dia":    dev_dia,
 })
-bp_val.to_csv(os.path.join(OUT_DIR, "bp_validation.csv"), index=False)
-print(f"\nbp_validation.csv: {len(bp_val)} rows")
 
-# ── spo2_hr.csv ────────────────────────────────────────────────────────
-# SpO2 not in this dataset — HR only, honestly labelled
-hr_df = df[test_mask][["hr_est", "hr_ref"]].copy().reset_index(drop=True)
-hr_df.columns   = ["dev_hr", "ref_hr"]
-hr_df["ref_spo2"] = np.nan
-hr_df["dev_spo2"] = np.nan
-hr_df.to_csv(os.path.join(OUT_DIR, "spo2_hr.csv"), index=False)
-print(f"spo2_hr.csv: {len(hr_df)} rows (SpO2 unavailable in this dataset)")
+bp_val = bp_raw.groupby("subject_id").agg(
+    ref_sys=("ref_sys", "first"),
+    ref_dia=("ref_dia", "first"),
+    dev_sys=("dev_sys", "mean"),
+    dev_dia=("dev_dia", "mean"),
+).reset_index()
+
+bp_val.to_csv(os.path.join(OUT_DIR, "bp_validation.csv"), index=False)
+print(f"\nbp_validation.csv: {len(bp_val)} subjects (averaged across segments)")
+
+sys_bias = (bp_val["dev_sys"] - bp_val["ref_sys"]).mean()
+sys_sd   = (bp_val["dev_sys"] - bp_val["ref_sys"]).std()
+dia_bias = (bp_val["dev_dia"] - bp_val["ref_dia"]).mean()
+dia_sd   = (bp_val["dev_dia"] - bp_val["ref_dia"]).std()
+print(f"  Systolic  bias={sys_bias:+.2f} mmHg  SD={sys_sd:.2f} mmHg")
+print(f"  Diastolic bias={dia_bias:+.2f} mmHg  SD={dia_sd:.2f} mmHg")
+
+# ── spo2_hr.csv — HR only, SpO2 unavailable ────────────────────────────
+hr_raw = pd.DataFrame({
+    "subject_id": df["subject_id"].values[test_mask],
+    "dev_hr":     df["hr_est"].values[test_mask],
+    "ref_hr":     df["hr_ref"].values[test_mask],
+})
+
+hr_val = hr_raw.groupby("subject_id").agg(
+    ref_hr=("ref_hr", "first"),
+    dev_hr=("dev_hr", "mean"),
+).reset_index()
+hr_val["ref_spo2"] = np.nan
+hr_val["dev_spo2"] = np.nan
+
+hr_val.to_csv(os.path.join(OUT_DIR, "spo2_hr.csv"), index=False)
+print(f"spo2_hr.csv: {len(hr_val)} subjects (SpO2 unavailable in this dataset)")
 
 # ── risk_model_predictions.csv ─────────────────────────────────────────
-# Hypertension label: SBP >= 140 OR DBP >= 90 (standard clinical threshold)
 df["y_true"] = ((df["sbp"] >= 140) | (df["dbp"] >= 90)).astype(int)
 print(f"\nClass distribution: {df['y_true'].value_counts().to_dict()}")
 
@@ -176,13 +232,19 @@ X_tr, X_te, y_tr, y_te = train_test_split(
     X_all, y_all, test_size=0.2, random_state=42, stratify=y_all
 )
 
-clf = GradientBoostingClassifier(n_estimators=200, random_state=42)
+clf = GradientBoostingClassifier(
+    n_estimators=300, max_depth=4, learning_rate=0.05, random_state=42
+)
 clf.fit(X_tr, y_tr)
 y_score = clf.predict_proba(X_te)[:, 1]
+
+from sklearn.metrics import roc_auc_score, f1_score
+print(f"  Risk AUC: {roc_auc_score(y_te, y_score):.3f}")
+print(f"  Risk F1:  {f1_score(y_te, (y_score>=0.5).astype(int), zero_division=0):.3f}")
 
 risk_df = pd.DataFrame({"y_true": y_te, "y_score": y_score.round(4)})
 risk_df.to_csv(os.path.join(OUT_DIR, "risk_model_predictions.csv"), index=False)
 print(f"risk_model_predictions.csv: {len(risk_df)} rows")
 
 print("\nDone. Now run:")
-print("  python vitalguard_analysis.py --data ./measured --out ./figures_real")
+print("  python run_analysis.py --data ./measured --out ./figures_real")
